@@ -1281,7 +1281,7 @@ if [[ $NotifyReq == true ]]; then
 	notify-send "Encoding completed @ $(date +%r)" "${SourceFile}"
 
 	# Play sound.
-	paplay --volume 52000 "./fanc_alarm.ogg"
+	paplay --volume 52000 "./franc_alarm.ogg"
 fi
 
 # Normal termination.
