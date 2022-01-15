@@ -1,0 +1,1288 @@
+#!/usr/bin/env bash
+
+# Text effects.
+N=$(tput sgr0)
+C=$(tput setaf 6)
+
+# Path of the ffmpeg to be used. Can set the path of a custom complied one.
+FFPath='/usr/bin'
+
+# This change is available only in this script.
+export PATH="${FFPath}:${PATH}"
+
+# Name to be used when reporting Errors/usage.
+ErrName="${0##*/}"	# Strip /path/to/$0.
+ErrName="${ErrName^}"	# Capitalize first letter.
+
+# Function to print info about absent required external programs/commands and exiting.
+PrintRequiredNExit() {
+	printf "\n%s error: Required external program \"%s\" was not found.\n" "${ErrName}" "$1"
+	printf "Required programs: %s\n\n" "${RequiredProgs[*]}"
+	exit 1
+}
+
+# Awk based column fitter. Pretty printer for long file paths.
+AwkColFitter() {
+	awk -v COL1WIDTH=26 -v TERMWIDTH="$(tput cols)" \
+	'
+	BEGIN { COL2WIDTH = TERMWIDTH - COL1WIDTH }
+
+	{
+		currentLine = $0
+		if (length(currentLine) > COL2WIDTH) {
+
+			segRegExp = "^.{,"COL2WIDTH-1"}"
+			col2Text = ""
+
+			while (length(currentLine) > COL2WIDTH) {
+				currLineLen = length(currentLine)
+				match(currentLine, segRegExp)
+				lineSegment = substr(currentLine, RSTART, RLENGTH)
+				lineSegLen = length(lineSegment)
+				(col2Text != "") ? col2Text = col2Text "\n" lineSegment \
+								 : col2Text = lineSegment
+				currentLine = substr(currentLine, lineSegLen + 1, currLineLen)
+			}
+
+			col2Text = col2Text "\n" currentLine
+			spaceString = sprintf("%-*s", COL1WIDTH, " ")
+			gsub("\n", "\n"spaceString, col2Text) 
+			printf "%s\n", col2Text
+		}
+
+		else {
+			printf "%s\n", currentLine
+		}
+	}
+	' <<<"$1"
+}
+
+# Awk based printer function for pretty printing.
+AwkPrinter() {
+
+	# Commented version @ sandbox/AWK_printer.
+	awk -v WIDTH="$(tput cols)" \
+	'
+	BEGIN { FS="::"; RS="\n\n"; maxlen1=0; maxlen2=0; i=0 }
+
+	{
+		sub(/^\n/, "", $2); gsub("\n", " ", $2)
+		len = length ($1); if (len > maxlen1) maxlen1 = len
+		len = length ($2); if (len > maxlen2) maxlen2 = len
+		col1Data[i] = $1; col2Data[i++] = $2
+	}
+
+	END {
+
+		col1Width = maxlen1 + 1; colGap = 2; col2Width = WIDTH - col1Width - colGap
+
+		for (j=0; j<=i; j++) {
+			
+			currentLine = col2Data[j]; if (currentLine == "") continue
+
+			if (length(currentLine) > col2Width) {
+
+				printf "%-*s%-*s", col1Width, col1Data[j], colGap, " "
+				segRegExp = "^.{,"col2Width-1"} +"
+				col2Text = ""
+
+				while (length(currentLine) > col2Width) {
+
+					currLineLen = length(currentLine)
+					match(currentLine, segRegExp)
+					lineSegment = substr(currentLine, RSTART, RLENGTH)
+					lineSegLen = length(lineSegment)
+					(col2Text != "") ? col2Text = col2Text "\n" lineSegment \
+									 : col2Text = lineSegment
+					currentLine = substr(currentLine, lineSegLen + 1, currLineLen)
+				}
+
+				col2Text = col2Text "\n" currentLine
+				SpaceString = sprintf("%-*s%-*s", col1Width, " ", colGap, " ")
+				gsub("\n", "\n"SpaceString, col2Text) 
+				printf "%s\n", col2Text
+
+			}
+			else {
+				printf "%-*s%-*s%-*s\n", col1Width, col1Data[j], colGap, " ", \
+						col2Width, currentLine
+			}
+
+			printf "\n"
+		}
+	}
+	' </dev/stdin
+}
+
+# Function to print usage.
+PrintUsage (){
+	printf "\nReencodes a media file with given parameters using ffmpeg.\n"
+	printf "Use ${ErrName,} --help|-h for details.\n"
+
+	printf "\nParameters \"in\" and \"mode\" are mandatory.\n"
+	
+	printf	"\nUsage:\t${ErrName,} %s\n\t%s \n\t%s \n\t%s \n\t%s \n\t%s \n\t%s\n\t%s \n\t%s\n\t%s \n\t%s \n\t%s \n\n" \
+			"--in|-i <input file>"\
+			"--mode|-m crf:<crf_value> | 2pass:<reduction_factor> " \
+			"[--out|-o <output location>] [--encoder|-n <h264|h265>] " \
+			"[--abrate|-a <audio bitrate>] [--scale|-x <video scale>] " \
+			"[--start|-s,--end|-e <segment start and end>]" \
+			"[--format|-f <mp4|mkv>] " \
+			"[--vf|-v <video filter specification>] " \
+			"[--aspect|-r <aspect ratio>]" \
+			"[--log|-l <quiet|stats|info|warning|error>] " \
+			"[--dumponly|-y] [--dumpcmd[=file]|-d[file]]" \
+			"[--subtitles|-t <copy|none|auto>]" \
+			"[--backup|-b] [--help|-h] [--notify|-z]"
+}
+
+PrintDetailedUsage() {
+
+	AwkPrinter <<-EOF
+	--in|-i::
+	Source file. This should be a valid media file.
+
+	--mode|-m::
+	Mode of encoding. Either "crf" or "2pass".
+	<crf_value> can be between 0 to 51. ffmpeg defaults: h264=23, h265=28. 
+	Best < 18. <reduction_factor> is the required size % of the target with 
+	respect to the source.
+
+	--out|-o::
+	Location for the target file. Default is the current directory. Output file will be
+	automatically generated based on encoding parameters. If a file with the same name
+	already exists, a random string will be attached to the end of the file name.
+
+	--encoder|-n::
+	Video encoder to be used. Either "h264" or "h265". Default is "h264".
+
+	--abrate|-a::
+	Audio bitrate of the target. Default is 128k. The audio codec is hardcoded to be
+	libfdk_acc.
+
+	--scale|-x::
+	Target video dimensions. Allowed values: 360, 540, 720, 1080. Default: same as source.
+	For other values use --vf option to setup a "scale" filter.
+
+	--start|-s & --end|-e::
+	Segment the source using the start and end points given in [[hh:]mm:]ss format.
+	If only one of --start or --end is given, the other will be set either at the start
+	or the end of the source.
+	
+	--format|-f::
+	Container format required for target. Either "mp4" or "mkv". Default: "mp4"
+
+	--vf|-v::
+	Video filters to be used in encoding. This should be a valid filtergraph for
+	ffmpeg. This filtergraph cannot include "scale" filter if --scale option is given.
+
+	--aspect|-r::
+	Aspect ratio to be used in the target in the format W:H. Default: same as source.
+	This is a container level setting. For finer control, use --scale option or
+	the --vf option to set a "scale" filter.
+
+	--log|-l::
+	Logging verbosity. Should be one of "quiet,stats,info,warning,error". All options
+	hide the ffmpeg banner and set the given ffmpeg log level. "info" is the most verbose.
+	All options except "quiet" will display ffmpeg progress. Default: error.
+
+	--dumponly|-y::
+	Dump encoding parameters and ffmpeg command line to screen, exit without encoding.
+
+	--dumpcmd[=file]|-d[file]::
+	Append the encoding parameters and ffmpeg command lines to the given file. If
+	the file doesn't exist, it will be created. If this fails, a temporary file will
+	be created with the prefix "${ErrName}_". To print to stdout, use - as the file.
+
+	--subtitles|-t::
+	Encode source subtitles into the target. Should be one of "copy,none,auto". "copy"
+	will copy the source subtitles directly to target. Depending on the container, this
+	could fail. "none" will discard the subtitles. "auto" will choose the best subtitle
+	codec for target based on source and container. Default: none.
+
+	--backup|-b::
+	Back up the intermediate files generated by ffmpeg two pass encoding. The backed up
+	files will have .bak extension. If such a file already exists, a random string will
+	be appended to the file name before the .bak extension.
+
+	--help|-h::
+	Display this message and exit. Ignore other options.
+
+	--notify|-z::
+	Notify the user of the completion of the encoding process through send-notify system.
+	EOF
+
+}
+
+# Function to convert seconds into "HH hrs MM mins SS secs" string.
+SecsToHMS() {
+	(( h = "${1}"/3600 ))
+	(( m = ("${1}" % 3600) / 60 ))
+	(( s = "${1}"%60 ))
+	printf "%02d hrs %02d mins %02d secs\n" "$h" "$m" "$s"
+}
+
+# Function to convert seconds into "hh:mm:ss" string.
+SecsToHMSCo() {
+	(( h = "${1}"/3600 ))
+	(( m = ("${1}"%3600)/60 )) 
+	(( s = "${1}"%60 ))
+	printf "%02d:%02d:%02d" "$h" "$m" "$s"
+}
+
+# Function to convert HH:MM:SS into seconds.
+HMSToSecs() {
+	IFS=':' read -ra ARR <<< "$1"
+	(( SECS = 10#${ARR[0]} * 3600 ))	# 10# required to avoid numbers starting with 0 (e.g. 08)
+	(( SECS += 10#${ARR[1]} * 60 ))		# from being interpretted as octals.
+	(( SECS += 10#${ARR[2]} ))
+	printf "%d" "$SECS"
+}
+
+# Write parameters to dump file.
+DumpParamsToFile() {
+
+	# Should we dump to stdout?
+	if [[ $1 = "/dev/stdout" ]]; then
+		
+		# This is redundant with -y option. Therefore don't print to stdout if -y is given.
+		# -y prints the command line and exits. -d- actually encodes.
+		if [[ $DumpOnly = "yes" ]]; then
+			:
+		else
+			# Only the command string is required.
+			printf "\nffmpeg command:\n%s\n\n" "$CommandString" >> "$1"
+		fi
+
+	else
+
+		# Dump to an actual file. Dump all.
+		CRForRedFactor="$CRFValue""$RedFactor"
+		printf	"[**]\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${SourceFile}" "${OutLocation}" "${EncoderFlag}" \
+				"${ModeFlag}" "${CRForRedFactor}" "${TargetFileVideoBitrate}k" "${ABitrate}k" "${Segment}" \
+				"${VidScale}" "${VidFilter}" "${AspectRatio}" "${CommandString}" >> "$1"
+	fi
+
+}
+
+# Backup intermediate files created in two pass encoding.
+BackupIntermediateFiles() {
+
+	case "$1" in 
+		h264)
+			SourceFile1="ffmpeg2pass-0.log"
+			TargetFile1="${2}_${SourceFile1}.bak"
+			SourceFile2="ffmpeg2pass-0.log.mbtree"
+			TargetFile2="${2}_${SourceFile2}.bak"
+			;;
+
+		h265)
+			SourceFile1="x265_2pass.log"
+			TargetFile1="${2}_${SourceFile1}.bak"
+			SourceFile2="x265_2pass.log.cutree"
+			TargetFile2="${2}_${SourceFile2}.bak"
+			;;
+	esac
+
+	# Files must exist.
+	if [[ ! -f $SourceFile1 ]] || [[ ! -f $SourceFile2 ]]; then
+		printf "\n${ErrName} warning: Intermediate files not found. Backup failed.\n\n"
+		return 1
+	fi
+
+	printf "\n"
+	Backup "$SourceFile1" "$TargetFile1"
+	Backup "$SourceFile2" "$TargetFile2"
+	printf "\n"
+}
+
+# Carry out the actual backup operation and show progress.
+Backup() {
+
+	FileToCopy="$1"
+	BackupFile="$2"
+
+	if [[ -f $BackupFile ]]; then
+
+		# File exists.
+		# Create a random string and concat it to the backup file name.
+		TempRanString=$(mktemp -u "XXXXXXXXX")
+		BackupFile="${BackupFile}""_${TempRanString}"".bak"
+	fi
+
+	# Copy the file.
+	cp "$FileToCopy" "$BackupFile" & pid=$!
+
+	# Display a spinner while copying.
+	# Spinner's chars.
+	spin=("-" "\\" "|" "/")
+
+	printf "Backing up file \"%s\": %s" "$FileToCopy" "${spin[0]}"
+
+	while [[ -d /proc/$pid ]]; do
+		for i in "${spin[@]}"; do
+			printf "\b%s" "$i"
+			sleep 0.2
+		done
+	done
+
+	printf "\bDone.\n"
+}
+
+# Check whether required commands/programs are available.
+# Required: awk, notify-send, getopt, ffmpeg, ffprobe, stat, date, mv, cp, paplay, and mktemp.
+RequiredProgs=(awk notify-send getopt stat date mv cp ffmpeg ffprobe paplay dirname)
+
+for Program in "${RequiredProgs[@]}"; do
+	command -v "$Program" &>/dev/null || PrintRequiredNExit "$Program"
+done
+
+# If using --longoptions(-l), either provide a short options list with -o or provide an empty short options
+# list with -o "". Otherwise, the first parameter will not be reported.
+options=$(getopt -n "${ErrName}" -a -o "i:,o:,m:,n:,a:,x:,s:,e:,f:,l:,v:,r:,y,h,d::,t:,b,z" -l \
+"in:,out:,mode:,encoder:,abrate:,scale:,start:,end:,format:,log:,vf:,aspect:,dumponly,help,dumpcmd::"\
+",subtitles:,backup,notify" -- "$@")
+
+# getopt will return a non zero value only in the case of an unrecognized parameter or a parsing error.
+# Whether all required options are present or not is application logic that should be dealt with
+# separately.
+if [[ $? -ne 0 ]]; then
+	PrintUsage
+	exit 1
+fi
+
+# Bitmasking flags to store presence/absence of options.
+INP=2#000001; 	 OUTP=2#000010 		# Input and output parameters.
+MODEP=2#000100;  ENCODERP=2#001000 	# Mode and encoder.
+STARTP=2#010000; ENDP=2#100000		# Start and end point for segmentation.
+
+MASK=2#000000		# To build up the mask.
+MANMASK=2#000101	# Control mask for mandatory options.
+
+SFMASK=2#00		# To build up the scale and filter mask.
+SMASK=2#10		# Scale option present.
+FMASK=2#01		# Video filter option present.
+SFCMASK=2#11		# Control mask for filter and scale options.
+
+# Default values for some options.
+logx265="info"	# x265 logging setting.
+loglongp=true	# For verbose logging.
+Verbosity=""
+
+# Audio bitrate and audio encoder (hard coded).
+ABitrate=128; AudioEncoderString="-c:a libfdk_aac -b:a ${ABitrate}k"
+
+# Output container format.
+Format="mp4"; FormatString="-f mp4"
+
+# Segment related stuff.
+Segment=""; SegmentRequired=false; StartF=false; EndF=false
+
+# Video scale and filter.
+VidScale=""; VidFilter=""; VideoFilterString=""
+
+# Mode of encoding.
+CRFValue=""; RedFactor=""
+
+# Aspect ratio.
+AspectRatio=""
+
+# Dump options.
+DumpOnly=""; DumpCmd=""; DumpFile=""
+
+# Subtitles.
+SubReq=false; SubMode=""; SubtitleCodec=""; SubtitleString=""
+
+# Backup of two pass intermediate files.
+BackupReq=false
+
+# Wether to notify the completion of encoding to user or not.
+NotifyReq=false
+
+# Ease of logging.
+TargetFileVideoBitrate="N/A"
+
+# Regex for numbers.
+numRE='^[0-9]+$'
+
+# set "options" as the command line arguments list of the program.
+eval set -- "$options"
+
+while true; do
+
+	case "$1" in
+		
+		--in|-in|-i)
+			SourceFile="$2"
+			(( MASK |= INP ))
+			shift 2;;
+
+		--out|-out|-o)
+			OutLocation="$2"
+			(( MASK |= OUTP ))
+			shift 2;;
+
+		--mode|-mode|-m)
+			Mode="$2"
+			(( MASK |= MODEP ))
+			shift 2;;
+
+		--encoder|-encoder|-n)
+			Encoder="$2"
+			(( MASK |= ENCODERP ))
+			shift 2;;
+
+		--abrate|-abrate|-a)
+			
+			ABitrate="$2"
+
+			if [[ ! $ABitrate =~ $numRE || $ABitrate -lt 90 || $ABitrate -gt 320 ]]; then
+				printf "\n${ErrName} error: \"abrate\" should be a number between 90 and 320.\nScript terminated abnormally.\n\n"
+				exit 1;
+			else
+				AudioEncoderString="-c:a libfdk_aac -b:a ${ABitrate}k"
+			fi
+
+			shift 2;;
+
+		--scale|-scale|-x)
+			
+			case "$2" in
+				720|1080)
+					VidScale="hd${2}"
+					(( SFMASK |= SMASK ));;
+
+				360)
+					VidScale="nhd"
+					(( SFMASK |= SMASK ));;
+
+				540)
+					VidScale="qhd"
+					(( SFMASK |= SMASK ));;
+
+				*)
+					printf "\n${ErrName} error: \"scale\" should be either 360, 540, 720, or 1080.\nScript terminated abnormally.\n\n"
+					exit 1;;
+			esac
+			
+			shift 2;;
+
+		--start|-start|-s)
+			SegStart="$2"
+			(( MASK |= STARTP ))
+			shift 2;;
+
+		--end|-end|-e)
+			SegEnd="$2"
+			(( MASK |= ENDP ))
+			shift 2;;
+
+		--format|-format|-f)
+			
+			Format="$2"
+
+			case "$Format" in
+				"mp4")
+					FormatString="-f ${Format}";;
+				"mkv")
+					FormatString="-f matroska";;
+				*)
+					printf "\n${ErrName} error: \"format\" should be either mp4 or mkv.\nScript terminated abnormally.\n\n"
+					exit 1;;
+			esac
+
+			shift 2;;
+
+		--log|-log|-l)
+
+			case "$2" in
+				"info")
+					loglongp=true
+					logx265="$2"					
+					Verbosity="-hide_banner -loglevel \"$2\" -stats";;
+
+				"stats")
+					loglongp=false
+					logx265="none"
+					Verbosity="-hide_banner -loglevel quiet -stats";;
+					
+				"warning"|"error")
+					loglongp=false
+					logx265="$2"
+					Verbosity="-hide_banner -loglevel \"$2\" -stats";;
+
+				"quiet")
+					loglongp=false
+					logx265="none"
+					Verbosity="-hide_banner -loglevel \"$2\" -nostats";;
+
+				*)
+					printf "\n${ErrName} error: \"log\" should be one of <quiet|stats|info|warning|error>.\nScript terminated abnormally.\n\n"
+					exit 1;;
+			esac
+			
+			shift 2;;
+
+		--vf|-vf|-v)
+			VidFilter="$2"
+			(( SFMASK |= FMASK ))
+			shift 2;;
+
+		--aspect|-aspect|-r)
+			AspectRatio="$2"
+			shift 2;;
+
+		--dumponly|-dumponly|-y)
+			DumpOnly="yes"
+			shift 1;;
+
+		--dumpcmd|-dumpcmd|-d)
+			DumpCmd="yes"
+			DumpFile="$2"
+			shift 2;;
+
+		--help|-help|-h)
+			PrintUsage
+			PrintDetailedUsage
+			exit 0;;
+
+		--subtitles|-subtitles|-t)
+
+			case "$2" in
+
+				"copy")
+					SubReq=true
+					SubMode="copy"
+					;;
+
+				"none")
+					SubReq=false
+					SubMode=""
+					;;
+
+				"auto")
+					SubReq=true
+					SubMode="auto"
+					;;
+
+				"*")
+					printf "\n${ErrName} error: \"subtitle\" option should be one of <copy|none|auto>.\nScript terminated abnormally.\n\n"
+					exit 1
+					;;
+
+			esac
+
+			shift 2
+			;;
+
+		--backup|-backup|-b)
+			BackupReq=true
+			shift 1
+			;;
+
+		--notify|-z)
+			NotifyReq=true
+			shift 1
+			;;
+
+		--)
+			shift 1; break;;
+
+	esac
+	
+done
+
+# Check for mandatory parameters.
+if [[ ! $(( MASK & MANMASK )) -eq $MANMASK ]]; then
+	PrintUsage
+	exit 1
+fi
+
+# Check input file.
+if [[ ! -f $SourceFile ]]; then
+	printf "\n%s error: Source file does not exist or it is not a regular file.\n" "${ErrName}"
+	printf "Script terminated abnormally.\n\n"
+	exit 1
+fi
+
+# Check output location. If not provided, get current location.
+if [[ ! $(( MASK & OUTP )) -eq $OUTP ]]; then
+	OutLocation=$(pwd)
+fi
+
+# Add "/" to the end of output location.
+if [[ ${OutLocation: -1} != "/" ]]; then
+	OutLocation="${OutLocation}/"
+fi
+
+if [[ ! -d $OutLocation ]]; then
+	printf "\n%s error: Target location is not a valid directory.\nScript terminated abnormally.\n\n" "${ErrName}"
+	exit 1
+fi
+
+# Check mode.
+case "$Mode" in
+
+	2pass:*|2PASS:*)
+
+		ModeFlag="2pass"
+
+		# Split and get the value of <reduction_factor>.
+		IFS=':' read -ra temparray <<< "$Mode"
+		RedFactor="${temparray[1]}"
+
+		# Reduction factor must be an integer between 1 and 100.
+		if [[ ! $RedFactor =~ $numRE ]] || [[ $RedFactor -lt 1 ]] || [[ $RedFactor -gt 100 ]]; then
+			printf "\n%s error: \"reduction_factor\" should be a number between 1 and 100.\n" "${ErrName}"
+			printf "Script terminated abnormally.\n\n"
+			exit 1
+		fi
+		;;
+
+	crf:*|CRF:*)
+
+		ModeFlag="crf"
+
+		# Split and get value for crf value.
+		IFS=':' read -ra temparray <<< "$Mode"
+		CRFValue="${temparray[1]}"
+
+		# $CRFValue must be a number between 0 and 51.
+		if [[ ! $CRFValue =~ $numRE || $CRFValue -lt 0 || $CRFValue -gt 51 ]]; then
+			printf "\n%s error: \"crf_value\" must be a number between 0 and 51.\n" "${ErrName}"
+			printf "Script terminated abnormaly.\n\n"
+			exit 1
+		fi
+		;;
+
+	*)
+		printf "\n%s error: \"mode\" must be either 2pass:<reduction_factor> or crf:<crf_value>.\n" "${ErrName}"
+		printf "Script terminated abnormally.\n\n"
+		exit 1;;
+
+esac
+
+# Check encoder. If not given, set to h264.
+if [[ ! $(( MASK & ENCODERP )) -eq $ENCODERP ]]; then
+	Encoder="h264"
+fi
+
+case "$Encoder" in
+	h264|H264)
+		EncoderFlag="h264"
+		VideoEncoderString="-c:v h264 -preset slow";;
+
+	h265|H265)
+		EncoderFlag="h265"
+		VideoEncoderString="-c:v libx265 -preset slow";;
+
+	*)
+		printf "\n%s error: \"encoder\" must be either h264 or h265.\nScript terminated abnormally.\n\n" "${ErrName}"
+		exit 1;;
+esac
+
+# Build up video filter string.
+if [[ $(( SFMASK & SFCMASK )) -eq $SMASK ]]; then
+
+	# Only scale option is present.
+	VideoFilterString="-vf scale=size=$VidScale"
+
+elif [[ $(( SFMASK & SFCMASK )) -eq $FMASK ]]; then
+
+	# Only a video filter is present.
+	VideoFilterString="-vf \"$VidFilter\""
+
+elif [[ $(( SFMASK & SFCMASK )) -eq $SFCMASK ]]; then
+
+	# Both options are present.
+	# Check whether -vf contains scale.
+	if [[ $VidFilter == *"scale"* ]]; then
+		printf "\n%s error: If \"video filter specification\" contains the \"scale\" filter, the \"-scale\" " "${ErrName}"
+		printf "option is not allowed.\nScript terminated abnormally.\n\n"
+		exit 1
+	else
+		VideoFilterString="-vf \"scale=size=$VidScale,$VidFilter\""
+	fi
+
+else
+	# None of them are present.
+	VideoFilterString=""
+fi
+
+# Validate the aspect ratio. Width:Height = number:number.
+if [[ -n $AspectRatio ]]; then
+
+	numRE='^[0-9]+:[0-9]+$'
+
+	if [[ ! $AspectRatio =~ $numRE ]]; then
+		printf "\n%s error: Aspect ratio should have the form \"Width:Height\".\n" "${ErrName}"
+		printf "Script terminated abnormally.\n\n"
+		exit 1
+	else
+		AspectRatioString="-aspect \"$AspectRatio\""
+	fi
+
+else
+	AspectRatio=""
+	AspectRatioString=""
+fi
+
+# Check whether verbosity is set. If not, set to "error".
+if [[ -z $Verbosity ]]; then
+	loglongp=false
+	logx265="error"
+	Verbosity="-hide_banner -loglevel \"error\" -stats"
+fi
+
+# Access the input file and gather relevant information.
+# Size.
+SourceFileSizeBytes=$(printf "%.0f" "$(stat -c%s "$SourceFile")")
+(( SourceFileSizeMB = SourceFileSizeBytes / 1000000 ))
+
+# Bitrate.
+SourceFileVideoBitrate=$(ffprobe -hide_banner -v quiet -select_streams v:0 -show_entries stream=bit_rate \
+						-of csv="p=0" "$SourceFile")
+
+# Filter out any repetitive N/A's.
+SourceFileVideoBitrate=$(echo "$SourceFileVideoBitrate" | tr ' ' '\n' | sort -u | xargs)
+
+if [[ ! $SourceFileVideoBitrate = "N/A" ]]; then 
+	(( SourceFileVideoBitrate = SourceFileVideoBitrate / 1000 ))
+else
+	SourceFileVideoBitrate="N/A"
+fi
+
+# Duration.
+SourceFileDuration=$(ffprobe -i "$SourceFile" -show_entries format=duration -v quiet -of csv="p=0")
+SourceFileDuration=$(printf "%.0f" "$SourceFileDuration")	# round off
+SourceFileDurationHMS=$(SecsToHMS "$SourceFileDuration")
+
+# Time specifications.
+TimeRegExHMS='^([01]?[0-9]|2[0-3]):([0-5]?[0-9]):([0-5]?[0-9])$'
+TimeRegExMS='^([0-5]?[0-9]):([0-5]?[0-9])$'
+TimeRegExS='^([0-5]?[0-9])$'
+
+# If start is present...
+if [[ $(( MASK & STARTP )) -eq $STARTP ]]; then
+
+	if [[ $SegStart =~ $TimeRegExHMS ]]; then
+		StartF=true
+	elif [[ $SegStart =~ $TimeRegExMS ]]; then
+		StartF=true
+		SegStart='00:'"$SegStart"
+	elif [[ $SegStart =~ $TimeRegExS ]]; then
+		StartF=true
+		SegStart='00:00:'"$SegStart"
+	else
+		printf "\n%s error: \"start\" should have the format [[hh:]mm:]ss where \"mm\"<60 and \"ss\"<60.\n" "${ErrName}"
+		printf "Script terminated abnormally.\n\n"
+		exit 1		
+		StartF=false
+	fi
+
+else
+	StartF=false
+fi
+
+# If end is present...
+if [[ $(( MASK & ENDP )) -eq $ENDP ]]; then
+
+	if [[ $SegEnd =~ $TimeRegExHMS ]]; then
+		EndF=true
+	elif [[ $SegEnd =~ $TimeRegExMS ]]; then
+		EndF=true
+		SegEnd='00:'"$SegEnd"
+	elif [[ $SegEnd =~ $TimeRegExS ]]; then
+		EndF=true
+		SegEnd='00:00:'"$SegEnd"
+	else
+		printf "\n%s error: \"end\" should have the format [[hh:]mm:]ss where \"mm\"<60 and \"ss\"<60.\n" "${ErrName}"
+		printf "Script terminated abnormally.\n\n"
+		exit 1		
+		EndF=false
+	fi
+
+else
+	EndF=false
+fi
+
+# If only start is present...
+if [[ $StartF = true ]] && [[ $EndF = false ]]; then
+
+	# Set SegEnd to the end of file timestamp.
+	SegEnd=$(SecsToHMSCo "$SourceFileDuration")
+	SegmentRequired=true
+
+# If only end is present...
+elif [[ $StartF = false ]] && [[ $EndF = true ]]; then
+
+	# Set SegStart to 0.
+	SegStart="0:0:0"
+	SegmentRequired=true
+
+# If both aren't present...
+elif [[ $StartF = false ]] && [[ $EndF = false ]]; then
+	
+	# No segments required.
+	SegmentRequired=false
+	SegmentString=""
+	Segment=""
+
+# If both are present...
+else
+	SegmentRequired=true
+fi
+
+# Check whether segment is within duration limit.
+if [[ $SegmentRequired == true ]]; then
+	
+	# Both must be smaller than duration and start < end.
+	SegStartSecs=$(HMSToSecs "$SegStart")
+	SegEndSecs=$(HMSToSecs "$SegEnd")
+
+	if [[ $SegEndSecs -le $SegStartSecs ]]; then
+		
+		printf "\n${ErrName} error: Invalid segment specification. Condition \"end\">=\"start\" not met.\n"
+		printf "Script terminated abnormally.\n\n"
+		exit 1;
+	
+	elif [[ $SegEndSecs -gt $SourceFileDuration ]]; then
+		
+		printf "\n${ErrName} error: Invalid segment specification. Condition \"end\"<=\"video duration\" not met.\n"
+		printf "Script terminated abnormally.\n\n"
+		exit 1;
+
+	elif [[ $SegStartSecs -ge $SourceFileDuration ]]; then
+		
+		printf "\n${ErrName} error: Invalid segment specification. Condition \"start\"<=\"video duration\" not met.\n"
+		printf "Script terminated abnormally.\n\n"
+		exit 1;
+
+	else
+		Segment="${SegStart}-${SegEnd}"
+		SegmentString="-ss ${SegStart} -to ${SegEnd}"
+	fi
+
+else
+	Segment=""
+	SegmentString=""
+fi
+
+# Target file name. Depends on mode, encoder, and format.
+TargetFileName="${SourceFile##*/}"
+TargetFilePath="$OutLocation""${TargetFileName%.*}""_${EncoderFlag}-${ModeFlag}-reencoded_.$Format"
+
+# If target file already exists, add something random to the end of the file name.
+if [[ -f $TargetFilePath ]]; then
+	RanString=$(mktemp -u "XXXXXXXXX")
+	TargetFilePath="$OutLocation""${TargetFileName%.*}""_${EncoderFlag}-${ModeFlag}-reencoded_${RanString}_.$Format"	
+fi
+
+OutputString="${TargetFilePath}"
+
+# Dump file. Validate or create. 
+if [[ -n $DumpCmd ]]; then
+
+	# If $DumpFile string is empty, create a temp file.
+	if [[ -z $DumpFile ]]; then
+		DumpFile=$(mktemp -p ./ "${ErrName}_XXXXX")
+	else 
+
+		# If it is not empty, check for -.
+		if [[ $DumpFile = "-" ]]; then
+			DumpFile="/dev/stdout"
+
+		# If not -, check whether $DumpFile exists...
+		elif [[ -f $DumpFile ]]; then
+
+			# If so, it should be a plain text file.
+			if [[ $(file -i $DumpFile | cut -d' ' -f2) = "text/plain;" ]]; then
+				: # Nothing to do.
+			else
+				# If not, create a temp file.
+				DumpFile=$(mktemp -p "${ErrName}_XXXXX")
+			fi
+
+		else
+			
+			# If the file doesn't exist, create an empty file with the name "$DumpFile".
+			touch "$DumpFile" &> /dev/null
+
+			if [[ $? -ne 0 ]]; then
+				printf "\n${ErrName} error: Could not create the dump file: $DumpFile.\n"
+				printf "Script terminated abnormally.\n\n"
+				exit 1
+			fi
+
+		fi
+
+	fi
+
+fi
+
+# Process subtitles.
+if [[ $SubReq = true ]]; then
+
+	# We need subtitles in the output.
+	# Check whether the input has subtitles.
+	SourceStreamInfo=$(ffprobe -hide_banner -v quiet  -show_entries stream=codec_type,codec_name \
+					  -of csv="p=0" "$SourceFile")
+
+	while IFS='' read -r line || [[ -n $line ]]; do
+
+		IFS=',' read -r -a SubArr <<< "$line"
+
+		if [[ ${SubArr[1]} == *"subtitle"* ]]; then
+
+			# Subtitle stream found.
+			# Check subtitle mode.
+			case "$SubMode" in
+				
+				"copy")
+					SubtitleCodec="codec copy"
+					SubtitleString="-c:s copy"	# Might fail depending on the container.
+					;;
+
+				"auto")
+
+					case "${SubArr[0]}" in
+
+						dvd*|dvb*|xsub*|pgs*)
+							
+							# Bitmap subtitles.
+							case "$Format" in 
+								
+								mp4)
+									# Choose dvdsub.
+									SubtitleCodec="dvdsub"
+									SubtitleString="-c:s dvd_subtitle"
+									;;
+
+								mkv)
+									# Choose dvdsub
+									SubtitleCodec="dvdsub"
+									SubtitleString="-c:s dvd_subtitle"
+									;;
+
+							esac
+							;;
+
+						*)
+							
+							# Text based subtitles.
+							case "$Format" in 
+								
+								mp4)
+									# Choose mov_text.
+									SubtitleCodec="mov_text"
+									SubtitleString="-c:s mov_text"
+									;;
+
+								mkv)
+									# Choose ass
+									SubtitleCodec="ass"
+									SubtitleString="-c:s ass"
+									;;
+
+							esac
+							;;
+
+					esac
+					;;
+
+			esac
+
+		fi
+
+	done <<< "$SourceStreamInfo"
+
+else
+
+	# We don't need subtitles.
+	SubtitleCodec=""
+	SubtitleString="-sn"
+fi
+
+# Print basic information.
+printf "\nSource file path\t: "; AwkColFitter "$SourceFile"
+printf "Target file path\t: "; AwkColFitter "$TargetFilePath"
+printf "Source video duration\t: %d seconds\t   %s\n" "$SourceFileDuration" "$SourceFileDurationHMS"
+printf "Target audio bitrate\t: %d kbps\n" "$ABitrate"
+printf "Target container format\t: %s\n" "$Format"
+printf "Target encoder\t\t: %s\n" "$EncoderFlag"
+printf "Target encoding mode\t: %s\n" "$ModeFlag"
+[[ -n $Segment ]] && printf "Target video segment\t: %s\n" "$Segment"
+[[ -n $VidScale ]] && printf "Target video scale\t: %s\n" "$VidScale"
+[[ -n $VidFilter ]] && printf "Target video filter(s)\t: %s\n" "$VidFilter"
+[[ -n $AspectRatio ]] && printf "Target aspect ratio\t: %s\n" "$AspectRatio"
+[[ -n $DumpFile ]] && printf "Dump file\t\t: %s\n" "$DumpFile"
+"$SubReq" && printf "Subtitle codec\t\t: %s\n" "$SubtitleCodec"
+"$BackupReq" && [[ $ModeFlag == "2pass" ]] && printf "Backup requested\t: Yes\n"
+"$NotifyReq" && printf "Notification requested\t: Yes\n"
+
+# Encode depending on mode and encoder.
+case "$ModeFlag" in
+
+	"crf")
+
+		printf "Constant Rate Factor\t: %d\n\n" "$CRFValue"	
+
+		# Timing.
+		ConvStartTime=$(date +%s)
+		[[ -z $DumpOnly ]] && printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion started @ %s.\n${N}" \
+									 "$(date +%r) $(date +%d-%m-%Y)"
+		[[ -z $DumpOnly ]] && "$loglongp" && printf '%*s\n\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '-'
+		
+		# Bitrate calculations are not necessary.
+		case "$EncoderFlag" in
+
+			"h264")
+				ModeString="-crf ${CRFValue}"
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString \"$OutputString\""	
+
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "ffmpeg command: %s\n\n" "$CommandString"
+					exit 2
+				else
+
+					eval "$CommandString"
+				
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"
+						exit 1
+					fi
+				
+				fi
+				;;
+
+			"h265")
+				ModeString="-x265-params \"crf=${CRFValue}:log-level=${logx265}\""
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString \"$OutputString\""
+
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+				
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "ffmpeg command: %s\n\n" "$CommandString"
+					exit 2
+				else
+					
+					eval "$CommandString"
+
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"			
+						exit 1
+					fi
+				
+				fi
+				;;
+
+		esac
+
+		ConvEndTime=$(date +%s)
+		ConvDuration=$(SecsToHMS "$(( ConvEndTime - ConvStartTime ))")
+		[[ -z $DumpOnly ]] && printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion completed in %s @ %s.\n\n${N}" \
+									 "$ConvDuration" "$(date +%r) $(date +%d-%m-%Y)"
+		;;
+
+	"2pass")
+
+		# Output bitrate calculations.
+		(( TargetFileSizeBytes = SourceFileSizeBytes * RedFactor / 100 ))
+		(( TargetFileSizekb = TargetFileSizeBytes * 8 / 1000 ))
+		(( TargetFileTotalBitrate = TargetFileSizekb / SourceFileDuration ))
+		(( TargetFileVideoBitrate = TargetFileTotalBitrate - ABitrate ))
+
+		(( TargetFileSizeMB = TargetFileSizeBytes / 1000000 ))
+
+		printf "\nSize reduction factor\t: %d%%\n" "$RedFactor"
+
+		! "$SegmentRequired" && printf "Source file size\t: %d MB\n" "$SourceFileSizeMB"
+		! "$SegmentRequired" && printf "Target file size\t: %d MB\n\n" "$TargetFileSizeMB"
+		
+		printf "Source video bitrate\t: %s kbps\n" "$SourceFileVideoBitrate"
+		printf "Target video bitrate\t: %d kbps\n" "$TargetFileVideoBitrate"
+		printf "\n"
+
+		case "$EncoderFlag" in
+
+			"h264")
+
+				ModeString="-pass 1 -b:v ${TargetFileVideoBitrate}k"
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString -y /dev/null"
+					
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+		
+				# If only dumping of the details and command line is required.
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "ffmpeg command: %s\n\n" "$CommandString"
+
+					# In this case, we do not need backups regardless of what user has requested.
+					BackupReq=false
+				else
+
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 1 started @ %s.\n${N}" \
+						   "$(date +%r) $(date +%d-%m-%Y)"				
+					"$loglongp" && printf '%*s\n\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '-'
+
+					ConvStartTime=$(date +%s)
+
+					eval "$CommandString"
+					
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"				
+						rm ./ffmpeg2pass-0.log > /dev/null 2>&1
+						rm ./ffmpeg2pass-0.log.mbtree > /dev/null 2>&1
+						exit 1
+					fi
+				
+					ConvEndTime=$(date +%s)
+					ConvDuration=$(SecsToHMS "$(( ConvEndTime - ConvStartTime ))")
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 1 completed in %s @ %s.\n${N}" \
+						   "$ConvDuration" "$(date +%r) $(date +%d-%m-%Y)"
+				
+				fi
+
+				# Backup intermediate files if requested.
+				if [[ $BackupReq = true ]]; then
+					BackupIntermediateFiles "h264" "$SourceFile"
+				else
+					printf "\n"
+				fi
+
+				ModeString="-pass 2 -b:v ${TargetFileVideoBitrate}k"
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString \"$OutputString\""
+
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+				
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "ffmpeg command: %s\n\n" "$CommandString"
+					exit 2
+				else
+					
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 2 started @ %s.\n${N}" \
+						   "$(date +%r) $(date +%d-%m-%Y)"				
+				 	"$loglongp" && printf '%*s\n\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '-'
+
+					ConvStartTime=$(date +%s)
+
+					eval "$CommandString"
+	
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"
+						rm ./ffmpeg2pass-0.log > /dev/null 2>&1
+						rm ./ffmpeg2pass-0.log.mbtree > /dev/null 2>&1
+						exit 1
+					fi
+
+					ConvEndTime=$(date +%s)
+					ConvDuration=$(SecsToHMS "$(( ConvEndTime - ConvStartTime ))")
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 2 completed in %s @ %s.\n\n${N}" \
+						   "$ConvDuration" "$(date +%r) $(date +%d-%m-%Y)"
+
+				fi
+
+				rm ./ffmpeg2pass-0.log > /dev/null 2>&1
+				rm ./ffmpeg2pass-0.log.mbtree > /dev/null 2>&1
+				;;
+
+			"h265")
+
+				ModeString="-x265-params \"pass=1:log-level=${logx265}\" -b:v ${TargetFileVideoBitrate}k"
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString -y /dev/null"
+
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+
+				# If only dumping of the details and command line is required.
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "Command: %s\n\n" "$CommandString"
+
+					# In this case, we do not need backups regardless of what user has requested.
+					BackupReq=false					
+				else
+				
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 1 started @ %s.\n${N}" \
+						   "$(date +%r) $(date +%d-%m-%Y)"				
+					"$loglongp" && printf '%*s\n\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '-'
+				
+					ConvStartTime=$(date +%s)
+
+					eval "$CommandString"
+					
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"
+						rm ./x265_2pass.log > /dev/null 2>&1
+						rm ./x265_2pass.log.cutree > /dev/null 2>&1
+						exit 1
+					fi					
+
+					ConvEndTime=$(date +%s)
+					ConvDuration=$(SecsToHMS "$(( ConvEndTime - ConvStartTime ))")
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 1 completed in %s @ %s.\n${N}" \
+						   "$ConvDuration" "$(date +%r) $(date +%d-%m-%Y)"				
+				
+				fi
+
+				# If backup was requested.
+				if [[ $BackupReq = true ]]; then
+					BackupIntermediateFiles "h265" "$SourceFile"
+				else
+					printf "\n"
+				fi
+
+				ModeString="-x265-params \"pass=2:log-level=${logx265}\" -b:v ${TargetFileVideoBitrate}k"
+				CommandString="ffmpeg $Verbosity -i \"$SourceFile\" $AspectRatioString $VideoFilterString $SegmentString $VideoEncoderString $ModeString $AudioEncoderString $SubtitleString $FormatString \"$OutputString\""
+
+				# Dump parameters into the dump file.
+				[[ -n $DumpCmd ]] && DumpParamsToFile "$DumpFile"
+
+				if [[ $DumpOnly = "yes" ]]; then
+					printf "Command: %s\n\n" "$CommandString"
+					exit 2
+				else
+
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 2 started @ %s.\n${N}" \
+						   "$(date +%r) $(date +%d-%m-%Y)"				
+			 		"$loglongp" && printf '%*s\n\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' '-'
+				
+					ConvStartTime=$(date +%s)
+
+					eval "$CommandString"
+
+					if [[ $? -ne 0 ]]; then
+						printf "\n${ErrName} error: ffmpeg encountered a fatal error.\nScript terminated abnormally.\n\n"
+						rm ./x265_2pass.log > /dev/null 2>&1
+						rm ./x265_2pass.log.cutree > /dev/null 2>&1
+						exit 1
+					fi
+
+					ConvEndTime=$(date +%s)
+					ConvDuration=$(SecsToHMS "$(( ConvEndTime - ConvStartTime ))")
+					printf "${C}ffmpeg ${EncoderFlag} ${ModeFlag} conversion pass 2 completed in %s @ %s.\n\n${N}" \
+						   "$ConvDuration" "$(date +%r) $(date +%d-%m-%Y)"
+
+				fi
+				
+				rm ./x265_2pass.log > /dev/null 2>&1
+				rm ./x265_2pass.log.cutree > /dev/null 2>&1
+				;;
+		esac
+		;;
+esac
+
+# If a notification was requested.
+if [[ $NotifyReq == true ]]; then
+	notify-send "Encoding completed @ $(date +%r)" "${SourceFile}"
+
+	# Play sound.
+	paplay --volume 52000 "./fanc_alarm.ogg"
+fi
+
+# Normal termination.
+exit 0
